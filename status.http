@@ -1,0 +1,4 @@
+@baseUrl = http://localhost:8787
+@adminKey = "1c5c9d9f-2f37-4e27-aa3f-dfe26a2fbda1"
+GET {{baseUrl}}/api/cache/status
+Accept: application/json

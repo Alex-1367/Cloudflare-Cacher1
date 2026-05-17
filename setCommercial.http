@@ -1,0 +1,26 @@
+@baseUrl = http://localhost:8787
+POST {{baseUrl}}/api/cache/update
+Content-Type: application/json
+
+{
+  "type": "commercial",
+  "properties": [
+    {
+      "id": 4001,
+      "title": "Commercial Space in Tivat",
+      "slug": "commercial-space-tivat",
+      "url": "https://statusm.me/sale/ft/commercial",
+      "price": "€300,000",
+      "priceRaw": 300000,
+      "location": "Tivat",
+      "city": "Tivat",
+      "region": "Boka Kotorska",
+      "type": "commercial",
+      "mainImage": "https://example.com/commercial.jpg",
+      "status": "available"
+    }
+  ],
+  "sourceIp": "192.168.1.100",
+  "userAgent": "Mozilla/5.0 (Test Script)",
+  "timestamp": "{{$datetime iso8601}}"
+}

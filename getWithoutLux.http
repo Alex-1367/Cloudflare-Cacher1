@@ -1,0 +1,3 @@
+@baseUrl = http://localhost:8787
+GET {{baseUrl}}/api/properties?luxury=false
+Accept: application/json

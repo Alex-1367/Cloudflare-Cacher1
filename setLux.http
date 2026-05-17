@@ -1,0 +1,42 @@
+@baseUrl = http://localhost:8787
+POST {{baseUrl}}/api/cache/update
+Content-Type: application/json
+
+{
+  "type": "luxury",
+  "properties": [
+      {
+      "id": 5002,
+      "title": "Luxury Penthouse with Sea View -2",
+      "slug": "luxury-penthouse-sea-view",
+      "url": "https://statusluxury.me/en/properties",
+      "price": "€750,000",
+      "priceRaw": 750000,
+      "location": "Pržno",
+      "type": "penthouse",
+      "mainImage": "https://example.com/penthouse.jpg",
+      "status": "available",
+      "bedrooms": 3,
+      "bathrooms": 3,
+      "size": 160
+    },
+    {
+      "id": 5003,
+      "title": "Luxury Penthouse with Sea View -3",
+      "slug": "luxury-penthouse-sea-view",
+      "url": "https://statusluxury.me/en/properties",
+      "price": "€750,000",
+      "priceRaw": 750000,
+      "location": "Pržno",
+      "type": "penthouse",
+      "mainImage": "https://example.com/penthouse.jpg",
+      "status": "available",
+      "bedrooms": 3,
+      "bathrooms": 3,
+      "size": 160
+    }
+  ],
+  "sourceIp": "192.168.1.100",
+  "userAgent": "Mozilla/5.0 (Test Script)",
+  "timestamp": "{{$datetime iso8601}}"
+}
