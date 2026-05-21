@@ -4,21 +4,64 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const startTime = Date.now();
     const requestId = crypto.randomUUID().slice(0, 8);
-    
-    // DIAGNOSTIC: Log every request
-    console.log(`[${requestId}] [REQUEST] ${request.method} ${url.pathname}`);
-    
+
+    const origin = request.headers.get('Origin');
+    const host = request.headers.get('Host');
+
+    // Allowed origins (browser requests)
+    const ALLOWED_ORIGINS = [
+      'https://admin.imbcargo-montenegro.com',
+      'http://localhost:4200',      // Add this for Angular dev server
+      'http://localhost:8787',      // For local worker development
+      'http://127.0.0.1:4200',      // Alternative localhost
+      'http://127.0.0.1:8787',      // Alternative local worker
+    ];
+
+    // For local development - allow requests from localhost
+    const isLocalRequest = host?.includes('localhost') ||
+      host?.includes('127.0.0.1') ||
+      host === 'localhost:8787' ||
+      host === '127.0.0.1:8787' ||
+      host === 'localhost:4200' ||
+      host === '127.0.0.1:4200';
+
+    // Check if origin is allowed OR it's a local request
+    const isAllowedOrigin = ALLOWED_ORIGINS.includes(origin) || isLocalRequest || origin === null;
+
+    // Log all requests
+    console.log(`[${requestId}] [CORS] Origin: ${origin}, Host: ${host}, isLocal: ${isLocalRequest}, Allowed: ${isAllowedOrigin}`);
+
+
+    // Block requests from unauthorized origins (for non-OPTIONS requests)
+    if (!isAllowedOrigin && !isLocalRequest && origin !== null) {
+      console.log(`[${requestId}] [CORS] BLOCKED - Origin not allowed: ${origin}`);
+      return new Response(JSON.stringify({
+        error: 'Unauthorized',
+        message: 'Access from this origin is not allowed'
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Dynamic CORS headers
     const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Origin': isAllowedOrigin && origin ? origin : '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Content-Type': 'application/json',
     };
-
+    // Handle CORS preflight
     if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders
+      });
     }
+
+    console.log(`[${requestId}] [REQUEST] ${request.method} ${url.pathname}`);
 
     // ============================================
     // ENDPOINT 1: Get all properties (from cache)
@@ -28,11 +71,11 @@ export default {
       try {
         const includeLuxury = url.searchParams.get('luxury') !== 'false';
         console.log(`[${requestId}] [PARAMS] includeLuxury: ${includeLuxury}`);
-        
+
         const result = await getAllCachedProperties(env, includeLuxury, requestId);
-        
+
         console.log(`[${requestId}] [RESULT] Found ${result.properties.length} properties`);
-        
+
         return new Response(JSON.stringify({
           source: 'cache',
           total: result.properties.length,
@@ -42,7 +85,7 @@ export default {
         }, null, 2), { headers: corsHeaders });
       } catch (error) {
         console.error(`[${requestId}] [ERROR] /api/properties:`, error);
-        return new Response(JSON.stringify({ error: error.message, stack: error.stack }), 
+        return new Response(JSON.stringify({ error: error.message, stack: error.stack }),
           { status: 500, headers: corsHeaders });
       }
     }
@@ -58,7 +101,7 @@ export default {
         return new Response(JSON.stringify(status, null, 2), { headers: corsHeaders });
       } catch (error) {
         console.error(`[${requestId}] [ERROR] /api/cache/status:`, error);
-        return new Response(JSON.stringify({ error: error.message, stack: error.stack }), 
+        return new Response(JSON.stringify({ error: error.message, stack: error.stack }),
           { status: 500, headers: corsHeaders });
       }
     }
@@ -71,14 +114,14 @@ export default {
       try {
         const updateData = await request.json();
         console.log(`[${requestId}] [UPDATE] Type: ${updateData.type}, Properties: ${updateData.properties?.length}`);
-        
+
         const result = await updateCache(env, updateData, requestId);
-        
+
         console.log(`[${requestId}] [RESULT] Success: ${result.success}`);
         return new Response(JSON.stringify(result, null, 2), { headers: corsHeaders });
       } catch (error) {
         console.error(`[${requestId}] [ERROR] /api/cache/update:`, error);
-        return new Response(JSON.stringify({ error: error.message, stack: error.stack }), 
+        return new Response(JSON.stringify({ error: error.message, stack: error.stack }),
           { status: 500, headers: corsHeaders });
       }
     }
@@ -91,25 +134,25 @@ export default {
       try {
         const auth = request.headers.get('X-Admin-Key');
         const expectedKey = env.ADMIN_KEY || 'your-secret-key';
-        
+
         console.log(`[${requestId}] [AUTH] Provided: ${auth?.substring(0, 8)}..., Expected: ${expectedKey?.substring(0, 8)}...`);
-        
+
         if (auth !== expectedKey) {
           console.log(`[${requestId}] [AUTH] Unauthorized`);
-          return new Response(JSON.stringify({ error: 'Unauthorized' }), 
+          return new Response(JSON.stringify({ error: 'Unauthorized' }),
             { status: 401, headers: corsHeaders });
         }
-        
+
         await clearAllCache(env, requestId);
         console.log(`[${requestId}] [RESULT] Cache cleared`);
-        
-        return new Response(JSON.stringify({ 
-          success: true, 
-          message: 'Cache cleared. Next request will trigger fresh scrape.' 
+
+        return new Response(JSON.stringify({
+          success: true,
+          message: 'Cache cleared. Next request will trigger fresh scrape.'
         }), { headers: corsHeaders });
       } catch (error) {
         console.error(`[${requestId}] [ERROR] /api/cache/refresh:`, error);
-        return new Response(JSON.stringify({ error: error.message }), 
+        return new Response(JSON.stringify({ error: error.message }),
           { status: 500, headers: corsHeaders });
       }
     }
@@ -123,7 +166,7 @@ export default {
         // DIAGNOSTIC: Check KV binding
         console.log(`[${requestId}] [DIAG] Checking KV binding...`);
         console.log(`[${requestId}] [DIAG] env.KV_BINDING exists: ${typeof env.KV_BINDING !== 'undefined'}`);
-        
+
         let kvTestResult = 'not tested';
         if (env.KV_BINDING) {
           try {
@@ -138,9 +181,9 @@ export default {
             console.error(`[${requestId}] [DIAG] ${kvTestResult}`);
           }
         }
-        
+
         const status = await getCacheStatus(env, requestId);
-        
+
         // Get all cache keys info
         const cacheKeysInfo = {};
         for (const [keyName, keyValue] of Object.entries(CACHE_KEYS)) {
@@ -151,7 +194,7 @@ export default {
             cacheKeysInfo[keyName] = `error: ${e.message}`;
           }
         }
-        
+
         return new Response(JSON.stringify({
           status: 'healthy',
           diagnostics: {
@@ -172,16 +215,16 @@ export default {
         }, null, 2), { headers: corsHeaders });
       } catch (error) {
         console.error(`[${requestId}] [ERROR] /api/health:`, error);
-        return new Response(JSON.stringify({ 
-          status: 'error', 
+        return new Response(JSON.stringify({
+          status: 'error',
           error: error.message,
-          stack: error.stack 
+          stack: error.stack
         }), { status: 500, headers: corsHeaders });
       }
     }
 
     console.log(`[${requestId}] [404] Not found: ${url.pathname}`);
-    return new Response(JSON.stringify({ 
+    return new Response(JSON.stringify({
       error: 'Not found',
       endpoints: [
         'GET /api/properties?luxury=true|false',
@@ -214,12 +257,12 @@ async function getAllCachedProperties(env, includeLuxury = true, requestId = 'un
   console.log(`[${requestId}] [getAllCachedProperties] Starting...`);
   console.log(`[${requestId}] [getAllCachedProperties] includeLuxury: ${includeLuxury}`);
   console.log(`[${requestId}] [getAllCachedProperties] env.KV_BINDING exists: ${!!env.KV_BINDING}`);
-  
+
   const cacheStatus = await getCacheStatus(env, requestId);
-  
+
   // Get all cache entries in parallel
   console.log(`[${requestId}] [getAllCachedProperties] Fetching cache keys: ${Object.values(CACHE_KEYS).join(', ')}`);
-  
+
   const [flats, houses, plots, commercial, luxury] = await Promise.all([
     env.KV_BINDING.get(CACHE_KEYS.FLATS, 'json'),
     env.KV_BINDING.get(CACHE_KEYS.HOUSES, 'json'),
@@ -227,23 +270,23 @@ async function getAllCachedProperties(env, includeLuxury = true, requestId = 'un
     env.KV_BINDING.get(CACHE_KEYS.COMMERCIAL, 'json'),
     includeLuxury ? env.KV_BINDING.get(CACHE_KEYS.LUXURY, 'json') : null,
   ]);
-  
+
   console.log(`[${requestId}] [getAllCachedProperties] Results - flats: ${flats?.data?.length || 0}, houses: ${houses?.data?.length || 0}, plots: ${plots?.data?.length || 0}, commercial: ${commercial?.data?.length || 0}, luxury: ${luxury?.data?.length || 0}`);
-  
+
   let allProperties = [];
-  
+
   if (flats?.data) allProperties.push(...flats.data);
   if (houses?.data) allProperties.push(...houses.data);
   if (plots?.data) allProperties.push(...plots.data);
   if (commercial?.data) allProperties.push(...commercial.data);
-  
+
   if (includeLuxury && luxury?.data) {
     const luxuryProps = luxury.data.map(p => ({ ...p, source: 'luxury' }));
     allProperties.push(...luxuryProps);
   }
-  
+
   console.log(`[${requestId}] [getAllCachedProperties] Total properties: ${allProperties.length}`);
-  
+
   return {
     properties: allProperties,
     cacheStatus: cacheStatus,
@@ -264,7 +307,7 @@ async function getAllCachedProperties(env, includeLuxury = true, requestId = 'un
 async function getCacheStatus(env, requestId = 'unknown') {
   console.log(`[${requestId}] [getCacheStatus] Starting...`);
   console.log(`[${requestId}] [getCacheStatus] env.KV_BINDING: ${typeof env.KV_BINDING}`);
-  
+
   if (!env.KV_BINDING) {
     console.error(`[${requestId}] [getCacheStatus] KV_BINDING is undefined!`);
     return {
@@ -274,14 +317,14 @@ async function getCacheStatus(env, requestId = 'unknown') {
       message: 'KV binding missing - check wrangler.toml configuration'
     };
   }
-  
+
   const status = await env.KV_BINDING.get(CACHE_KEYS.STATUS, 'json');
   const now = Date.now();
   const cacheTTL = (parseInt(env.CACHE_TTL_HOURS) || 1) * 60 * 60 * 1000;
-  
+
   console.log(`[${requestId}] [getCacheStatus] Status from KV: ${status ? 'exists' : 'empty'}`);
   console.log(`[${requestId}] [getCacheStatus] cacheTTL: ${cacheTTL}ms (${cacheTTL / 3600000} hours)`);
-  
+
   if (!status) {
     console.log(`[${requestId}] [getCacheStatus] No cache status found`);
     return {
@@ -292,12 +335,12 @@ async function getCacheStatus(env, requestId = 'unknown') {
       message: 'Cache is empty. Need initial scrape.'
     };
   }
-  
+
   const age = now - status.lastUpdated;
   const isFresh = age < cacheTTL;
-  
+
   console.log(`[${requestId}] [getCacheStatus] Last updated: ${new Date(status.lastUpdated).toISOString()}, age: ${Math.floor(age / 60000)} minutes, isFresh: ${isFresh}`);
-  
+
   return {
     isFresh: isFresh,
     lastUpdated: new Date(status.lastUpdated).toISOString(),
@@ -314,20 +357,20 @@ async function getCacheStatus(env, requestId = 'unknown') {
 // ============================================
 async function updateCache(env, updateData, requestId = 'unknown') {
   const { type, properties, sourceIp, userAgent, timestamp } = updateData;
-  
+
   console.log(`[${requestId}] [updateCache] Starting for type: ${type}`);
   console.log(`[${requestId}] [updateCache] Properties count: ${properties?.length || 0}`);
   console.log(`[${requestId}] [updateCache] Source IP: ${sourceIp}`);
-  
+
   const validTypes = ['flats', 'houses', 'plots', 'commercial', 'luxury'];
   if (!validTypes.includes(type)) {
     console.log(`[${requestId}] [updateCache] Invalid type: ${type}`);
     return { success: false, error: `Invalid type. Must be one of: ${validTypes.join(', ')}` };
   }
-  
+
   const cacheKey = `cache_${type}`;
   console.log(`[${requestId}] [updateCache] Cache key: ${cacheKey}`);
-  
+
   await env.KV_BINDING.put(cacheKey, JSON.stringify({
     data: properties,
     count: properties?.length || 0,
@@ -335,14 +378,14 @@ async function updateCache(env, updateData, requestId = 'unknown') {
     sourceIp: sourceIp,
     userAgent: userAgent
   }));
-  
+
   console.log(`[${requestId}] [updateCache] Stored in KV`);
-  
+
   await updateGlobalStatus(env, type, requestId);
   await updateAllIdsIndex(env, type, properties, requestId);
-  
+
   console.log(`[${requestId}] [updateCache] Complete`);
-  
+
   return {
     success: true,
     type: type,
@@ -356,10 +399,10 @@ async function updateCache(env, updateData, requestId = 'unknown') {
 // ============================================
 async function updateGlobalStatus(env, updatedType, requestId = 'unknown') {
   console.log(`[${requestId}] [updateGlobalStatus] Updating for type: ${updatedType}`);
-  
+
   const existing = await env.KV_BINDING.get(CACHE_KEYS.STATUS, 'json');
   const now = Date.now();
-  
+
   const newStatus = {
     lastUpdated: now,
     lastUpdatedISO: new Date(now).toISOString(),
@@ -369,7 +412,7 @@ async function updateGlobalStatus(env, updatedType, requestId = 'unknown') {
       [updatedType]: now
     }
   };
-  
+
   await env.KV_BINDING.put(CACHE_KEYS.STATUS, JSON.stringify(newStatus));
   console.log(`[${requestId}] [updateGlobalStatus] Status updated`);
 }
@@ -379,11 +422,11 @@ async function updateGlobalStatus(env, updatedType, requestId = 'unknown') {
 // ============================================
 async function updateAllIdsIndex(env, type, properties, requestId = 'unknown') {
   console.log(`[${requestId}] [updateAllIdsIndex] Updating index for ${properties?.length || 0} properties`);
-  
+
   const existing = await env.KV_BINDING.get(CACHE_KEYS.ALL_IDS, 'json');
   const index = existing || {};
   const now = Date.now();
-  
+
   let updatedCount = 0;
   for (const prop of properties) {
     if (prop.id) {
@@ -402,7 +445,7 @@ async function updateAllIdsIndex(env, type, properties, requestId = 'unknown') {
       updatedCount++;
     }
   }
-  
+
   await env.KV_BINDING.put(CACHE_KEYS.ALL_IDS, JSON.stringify(index));
   console.log(`[${requestId}] [updateAllIdsIndex] Index updated with ${updatedCount} properties`);
 }
@@ -412,7 +455,7 @@ async function updateAllIdsIndex(env, type, properties, requestId = 'unknown') {
 // ============================================
 async function clearAllCache(env, requestId = 'unknown') {
   console.log(`[${requestId}] [clearAllCache] Clearing all cache keys...`);
-  
+
   const keys = Object.values(CACHE_KEYS);
   for (const key of keys) {
     await env.KV_BINDING.delete(key);
