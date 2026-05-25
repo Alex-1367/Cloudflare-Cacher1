@@ -2,3 +2,4 @@ node_modules
 wrangler.toml
 .wrangler
 refresh.http
+upload.http

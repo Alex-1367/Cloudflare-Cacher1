@@ -13,10 +13,12 @@ export default {
     // Allowed origins (browser requests)
     const ALLOWED_ORIGINS = [
       'https://admin.imbcargo-montenegro.com',
-      'http://localhost:4200',      // Add this for Angular dev server
-      'http://localhost:8787',      // For local worker development
-      'http://127.0.0.1:4200',      // Alternative localhost
-      'http://127.0.0.1:8787',      // Alternative local worker
+      'http://localhost:4200',
+      'http://localhost:8787',
+      'http://127.0.0.1:4200',
+      'http://127.0.0.1:8787',
+      'http://127.0.0.1:5500',
+      'http://localhost:5500',
     ];
 
     // For local development - allow requests from localhost
@@ -25,6 +27,8 @@ export default {
       host === 'localhost:8787' ||
       host === '127.0.0.1:8787' ||
       host === 'localhost:4200' ||
+      host === 'localhost:5500' ||
+      host === '127.0.0.1:5500' ||
       host === '127.0.0.1:4200';
 
     // Check if origin is allowed OR it's a local request
@@ -32,7 +36,6 @@ export default {
 
     // Log all requests
     console.log(`[${requestId}] [CORS] Origin: ${origin}, Host: ${host}, isLocal: ${isLocalRequest}, Allowed: ${isAllowedOrigin}`);
-
 
     // Block requests from unauthorized origins (for non-OPTIONS requests)
     if (!isAllowedOrigin && !isLocalRequest && origin !== null) {
@@ -49,8 +52,8 @@ export default {
     // Dynamic CORS headers
     const corsHeaders = {
       'Access-Control-Allow-Origin': isAllowedOrigin && origin ? origin : '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Key, X-API-Key',
       'Content-Type': 'application/json',
     };
     // Handle CORS preflight
@@ -62,6 +65,28 @@ export default {
     }
 
     console.log(`[${requestId}] [REQUEST] ${request.method} ${url.pathname}`);
+
+    // ============================================
+    // TEMPORARY DEBUG ENDPOINT
+    // ============================================
+
+    if (url.pathname === '/api/debug/key' && request.method === 'GET') {
+      const auth = request.headers.get('X-Admin-Key');
+      const storedKey = env.ADMIN_KEY;
+
+      if (auth !== storedKey) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }),
+          { status: 401, headers: corsHeaders });
+      }
+
+      return new Response(JSON.stringify({
+        storedKeyLength: storedKey?.length || 0,
+        storedKeyPrefix: storedKey?.substring(0, 10) + '...',
+        yourKeyLength: auth?.length || 0,
+        yourKeyPrefix: auth?.substring(0, 10) + '...',
+        exactMatch: auth === storedKey
+      }), { headers: corsHeaders });
+    }
 
     // ============================================
     // ENDPOINT 1: Get all properties (from cache)
@@ -127,13 +152,13 @@ export default {
     }
 
     // ============================================
-    // ENDPOINT 4: Force refresh (admin only)
+    // ENDPOINT 4: Force delete (admin only)
     // ============================================
-    if (url.pathname === '/api/cache/refresh' && request.method === 'POST') {
-      console.log(`[${requestId}] [ENDPOINT] /api/cache/refresh`);
+    if (url.pathname === '/api/cache/delete' && request.method === 'POST') {
+      console.log(`[${requestId}] [ENDPOINT] /api/cache/delete`);
       try {
         const auth = request.headers.get('X-Admin-Key');
-        const expectedKey = env.ADMIN_KEY || 'your-secret-key';
+        const expectedKey = env.ADMIN_KEY
 
         console.log(`[${requestId}] [AUTH] Provided: ${auth?.substring(0, 8)}..., Expected: ${expectedKey?.substring(0, 8)}...`);
 
@@ -151,7 +176,7 @@ export default {
           message: 'Cache cleared. Next request will trigger fresh scrape.'
         }), { headers: corsHeaders });
       } catch (error) {
-        console.error(`[${requestId}] [ERROR] /api/cache/refresh:`, error);
+        console.error(`[${requestId}] [ERROR] /api/cache/delete`, error);
         return new Response(JSON.stringify({ error: error.message }),
           { status: 500, headers: corsHeaders });
       }
@@ -163,14 +188,12 @@ export default {
     if (url.pathname === '/api/health') {
       console.log(`[${requestId}] [ENDPOINT] /api/health`);
       try {
-        // DIAGNOSTIC: Check KV binding
         console.log(`[${requestId}] [DIAG] Checking KV binding...`);
         console.log(`[${requestId}] [DIAG] env.KV_BINDING exists: ${typeof env.KV_BINDING !== 'undefined'}`);
 
         let kvTestResult = 'not tested';
         if (env.KV_BINDING) {
           try {
-            // Try to write a test value
             await env.KV_BINDING.put('_test_key', 'test_value');
             const testValue = await env.KV_BINDING.get('_test_key');
             await env.KV_BINDING.delete('_test_key');
@@ -184,7 +207,6 @@ export default {
 
         const status = await getCacheStatus(env, requestId);
 
-        // Get all cache keys info
         const cacheKeysInfo = {};
         for (const [keyName, keyValue] of Object.entries(CACHE_KEYS)) {
           try {
@@ -223,6 +245,178 @@ export default {
       }
     }
 
+    // ============================================
+    // ENDPOINT 6: Extend cache TTL (admin only)
+    // ============================================
+    if (url.pathname === '/api/cache/extend' && request.method === 'POST') {
+      console.log(`[${requestId}] [ENDPOINT] /api/cache/extend`);
+
+      const auth = request.headers.get('X-Admin-Key');
+      const expectedKey = env.ADMIN_KEY;
+
+      if (!expectedKey) {
+        console.error(`[${requestId}] [AUTH] ADMIN_KEY not configured`);
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Server configuration error - ADMIN_KEY not set'
+        }), { status: 500, headers: corsHeaders });
+      }
+
+      if (!auth || auth !== expectedKey) {
+        console.log(`[${requestId}] [AUTH] Unauthorized - key mismatch`);
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Unauthorized - Invalid X-Admin-Key'
+        }), { status: 401, headers: corsHeaders });
+      }
+
+      try {
+        const body = await request.json();
+        const existing = await env.KV_BINDING.get(CACHE_KEYS.STATUS, 'json');
+        const now = Date.now();
+
+        if (!existing) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'No cache exists to extend'
+          }), { status: 404, headers: corsHeaders });
+        }
+
+        const requestedHours = body?.extendHours;
+        const ttlHours = requestedHours ? parseInt(requestedHours) : (parseInt(env.CACHE_TTL_HOURS) || 24);
+
+        console.log(`[${requestId}] [EXTEND] Requested hours: ${requestedHours}, Using: ${ttlHours}`);
+
+        const newExpiry = now + (ttlHours * 60 * 60 * 1000);
+
+        const updatedStatus = {
+          ...existing,
+          lastUpdated: now,
+          lastUpdatedISO: new Date(now).toISOString(),
+          extendedAt: now,
+          extendedBy: request.headers.get('CF-Connecting-IP') || 'admin',
+          previousLastUpdated: existing.lastUpdated,
+          expiresAt: newExpiry,
+          ttlHours: ttlHours
+        };
+
+        await env.KV_BINDING.put(CACHE_KEYS.STATUS, JSON.stringify(updatedStatus));
+
+        console.log(`[${requestId}] [EXTEND] Cache extended by ${ttlHours} hours`);
+
+        return new Response(JSON.stringify({
+          success: true,
+          message: `Cache TTL extended by ${ttlHours} hours`,
+          requestedHours: requestedHours || null,
+          appliedHours: ttlHours,
+          previousLastUpdated: new Date(existing.lastUpdated).toISOString(),
+          newLastUpdated: new Date(now).toISOString(),
+          expiresAt: new Date(newExpiry).toISOString()
+        }), { headers: corsHeaders });
+
+      } catch (error) {
+        console.error(`[${requestId}] [EXTEND] Error:`, error);
+        return new Response(JSON.stringify({
+          success: false,
+          error: error.message
+        }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // ============================================
+    // NEW ENDPOINT 7: Restore full data.json (admin only)
+    // Calls existing updateCache function 5 times
+    // ============================================
+    if (url.pathname === '/api/restore' && request.method === 'POST') {
+      console.log(`[${requestId}] [ENDPOINT] /api/restore`);
+
+      const auth = request.headers.get('X-Admin-Key');
+      const expectedKey = env.ADMIN_KEY;
+
+      if (!expectedKey) {
+        console.error(`[${requestId}] [AUTH] ADMIN_KEY not configured`);
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Server configuration error - ADMIN_KEY not set'
+        }), { status: 500, headers: corsHeaders });
+      }
+
+      if (!auth || auth !== expectedKey) {
+        console.log(`[${requestId}] [AUTH] Unauthorized - key mismatch`);
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Unauthorized - Invalid X-Admin-Key'
+        }), { status: 401, headers: corsHeaders });
+      }
+
+      try {
+        const data = await request.json();
+
+        // Validate input has properties array
+        if (!data.properties || !Array.isArray(data.properties)) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'Invalid format. Expected { properties: [] }'
+          }), { status: 400, headers: corsHeaders });
+        }
+
+        console.log(`[${requestId}] [RESTORE] Received ${data.properties.length} properties`);
+
+        // Split properties by type
+        const flats = data.properties.filter(p => p.type === 'flats');
+        const houses = data.properties.filter(p => p.type === 'houses');
+        const plots = data.properties.filter(p => p.type === 'plots');
+        const commercial = data.properties.filter(p => p.type === 'commercial');
+        const luxury = data.properties.filter(p => ['apartment', 'penthouse', 'townhouse', 'villa'].includes(p.type));
+
+        console.log(`[${requestId}] [RESTORE] Split: flats=${flats.length}, houses=${houses.length}, plots=${plots.length}, commercial=${commercial.length}, luxury=${luxury.length}`);
+
+        // Call existing updateCache function 5 times
+        const results = [];
+
+        if (flats.length > 0) {
+          const result = await updateCache(env, { type: 'flats', properties: flats }, requestId);
+          results.push(result);
+        }
+
+        if (houses.length > 0) {
+          const result = await updateCache(env, { type: 'houses', properties: houses }, requestId);
+          results.push(result);
+        }
+
+        if (plots.length > 0) {
+          const result = await updateCache(env, { type: 'plots', properties: plots }, requestId);
+          results.push(result);
+        }
+
+        if (commercial.length > 0) {
+          const result = await updateCache(env, { type: 'commercial', properties: commercial }, requestId);
+          results.push(result);
+        }
+
+        if (luxury.length > 0) {
+          const result = await updateCache(env, { type: 'luxury', properties: luxury }, requestId);
+          results.push(result);
+        }
+
+        console.log(`[${requestId}] [RESTORE] Complete. ${results.length} types restored`);
+
+        return new Response(JSON.stringify({
+          success: true,
+          message: 'Restore completed',
+          results: results,
+          totalProperties: data.properties.length
+        }, null, 2), { headers: corsHeaders });
+
+      } catch (error) {
+        console.error(`[${requestId}] [RESTORE] Error:`, error);
+        return new Response(JSON.stringify({
+          success: false,
+          error: error.message
+        }), { status: 500, headers: corsHeaders });
+      }
+    }
+
     console.log(`[${requestId}] [404] Not found: ${url.pathname}`);
     return new Response(JSON.stringify({
       error: 'Not found',
@@ -230,8 +424,10 @@ export default {
         'GET /api/properties?luxury=true|false',
         'GET /api/cache/status',
         'POST /api/cache/update',
-        'POST /api/cache/refresh (admin)',
-        'GET /api/health'
+        'POST /api/cache/delete (admin)',
+        'POST /api/cache/extend (admin)',
+        'GET /api/health',
+        'POST /api/restore (admin) - NEW! Upload full data.json'
       ]
     }), { status: 404, headers: corsHeaders });
   },
@@ -260,7 +456,6 @@ async function getAllCachedProperties(env, includeLuxury = true, requestId = 'un
 
   const cacheStatus = await getCacheStatus(env, requestId);
 
-  // Get all cache entries in parallel
   console.log(`[${requestId}] [getAllCachedProperties] Fetching cache keys: ${Object.values(CACHE_KEYS).join(', ')}`);
 
   const [flats, houses, plots, commercial, luxury] = await Promise.all([
@@ -320,25 +515,48 @@ async function getCacheStatus(env, requestId = 'unknown') {
 
   const status = await env.KV_BINDING.get(CACHE_KEYS.STATUS, 'json');
   const now = Date.now();
-  const cacheTTL = (parseInt(env.CACHE_TTL_HOURS) || 1) * 60 * 60 * 1000;
 
   console.log(`[${requestId}] [getCacheStatus] Status from KV: ${status ? 'exists' : 'empty'}`);
-  console.log(`[${requestId}] [getCacheStatus] cacheTTL: ${cacheTTL}ms (${cacheTTL / 3600000} hours)`);
 
   if (!status) {
     console.log(`[${requestId}] [getCacheStatus] No cache status found`);
+    const defaultTtl = (parseInt(env.CACHE_TTL_HOURS) || 24);
     return {
       isFresh: false,
       lastUpdated: null,
       nextUpdateAfter: null,
-      cacheTTLHours: cacheTTL / (60 * 60 * 1000),
+      cacheTTLHours: defaultTtl,
+      ttlHours: defaultTtl,
       message: 'Cache is empty. Need initial scrape.'
     };
   }
 
+  // FIX: Validate lastUpdated exists and is a valid number
+  if (!status.lastUpdated || typeof status.lastUpdated !== 'number' || isNaN(status.lastUpdated)) {
+    console.log(`[${requestId}] [getCacheStatus] Invalid lastUpdated value: ${status.lastUpdated}, using current time`);
+    // Fix the status by setting current time
+    const fixedStatus = {
+      ...status,
+      lastUpdated: now,
+      lastUpdatedISO: new Date(now).toISOString()
+    };
+    await env.KV_BINDING.put(CACHE_KEYS.STATUS, JSON.stringify(fixedStatus));
+    return {
+      isFresh: false,
+      lastUpdated: new Date(now).toISOString(),
+      lastUpdatedTimestamp: now,
+      ageMinutes: 0,
+      ttlHours: parseInt(env.CACHE_TTL_HOURS) || 24,
+      message: 'Cache status was invalid, has been fixed'
+    };
+  }
+
   const age = now - status.lastUpdated;
+  const effectiveTtlHours = status.ttlHours || (parseInt(env.CACHE_TTL_HOURS) || 24);
+  const cacheTTL = effectiveTtlHours * 60 * 60 * 1000;
   const isFresh = age < cacheTTL;
 
+  console.log(`[${requestId}] [getCacheStatus] cacheTTL: ${cacheTTL}ms (${cacheTTL / 3600000} hours)`);
   console.log(`[${requestId}] [getCacheStatus] Last updated: ${new Date(status.lastUpdated).toISOString()}, age: ${Math.floor(age / 60000)} minutes, isFresh: ${isFresh}`);
 
   return {
@@ -346,9 +564,10 @@ async function getCacheStatus(env, requestId = 'unknown') {
     lastUpdated: new Date(status.lastUpdated).toISOString(),
     lastUpdatedTimestamp: status.lastUpdated,
     ageMinutes: Math.floor(age / 60000),
+    ttlHours: effectiveTtlHours,
     nextUpdateAfter: new Date(status.lastUpdated + cacheTTL).toISOString(),
-    cacheTTLHours: cacheTTL / (60 * 60 * 1000),
-    message: isFresh ? 'Cache is fresh' : 'Cache expired - needs update'
+    cacheTTLHours: effectiveTtlHours,
+    message: isFresh ? `Cache is fresh (expires in ${Math.floor((cacheTTL - age) / 3600000)} hours)` : 'Cache expired - needs update'
   };
 }
 
