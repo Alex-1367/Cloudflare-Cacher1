@@ -417,6 +417,150 @@ export default {
       }
     }
 
+    // ============================================
+    // ENDPOINT 8: Update property details (allImages, descriptions)
+    // ============================================
+    if (url.pathname === '/api/properties/update-details' && request.method === 'POST') {
+      console.log(`[${requestId}] [ENDPOINT] /api/properties/update-details`);
+
+      try {
+        const auth = request.headers.get('X-API-Key');
+        const expectedKey = env.ADMIN_KEY;
+
+        if (!expectedKey || auth !== expectedKey) {
+          console.log(`[${requestId}] [AUTH] Unauthorized`);
+          return new Response(JSON.stringify({ error: 'Unauthorized' }),
+            { status: 401, headers: corsHeaders });
+        }
+
+        const detailData = await request.json();
+        const { propertyId, allImages, description_ru, description_en, features, size, bedrooms, bathrooms, floor } = detailData;
+
+        console.log(`[${requestId}] [DETAIL] Updating property ${propertyId} with ${allImages?.length || 0} images`);
+
+        // Find which type contains this property and update it
+        const types = ['flats', 'houses', 'plots', 'commercial', 'luxury'];
+        let updated = false;
+
+        for (const type of types) {
+          const cacheKey = `cache_${type}`;
+          const cached = await env.KV_BINDING.get(cacheKey, 'json');
+
+          if (cached && cached.data) {
+            const propertyIndex = cached.data.findIndex(p => p.id === propertyId);
+
+            if (propertyIndex !== -1) {
+              // Update the property with details
+              cached.data[propertyIndex] = {
+                ...cached.data[propertyIndex],
+                allImages: allImages || cached.data[propertyIndex].allImages || [],
+                description_ru: description_ru || cached.data[propertyIndex].description_ru,
+                description_en: description_en || cached.data[propertyIndex].description_en,
+                features: features || cached.data[propertyIndex].features || [],
+                size: size || cached.data[propertyIndex].size,
+                bedrooms: bedrooms || cached.data[propertyIndex].bedrooms,
+                bathrooms: bathrooms || cached.data[propertyIndex].bathrooms,
+                floor: floor || cached.data[propertyIndex].floor,
+                detailsUpdatedAt: new Date().toISOString()
+              };
+
+              // Save back to KV
+              await env.KV_BINDING.put(cacheKey, JSON.stringify(cached));
+              updated = true;
+              console.log(`[${requestId}] [DETAIL] Updated property ${propertyId} in ${type}`);
+              break;
+            }
+          }
+        }
+
+        if (updated) {
+          // Also update the all-ids index
+          const idsIndex = await env.KV_BINDING.get(CACHE_KEYS.ALL_IDS, 'json');
+          if (idsIndex) {
+            for (const type of types) {
+              const key = `${type}_${propertyId}`;
+              if (idsIndex[key]) {
+                idsIndex[key] = {
+                  ...idsIndex[key],
+                  allImages: allImages,
+                  description_ru: description_ru,
+                  description_en: description_en,
+                  features: features,
+                  detailsUpdatedAt: new Date().toISOString()
+                };
+                await env.KV_BINDING.put(CACHE_KEYS.ALL_IDS, JSON.stringify(idsIndex));
+                break;
+              }
+            }
+          }
+
+          return new Response(JSON.stringify({
+            success: true,
+            message: `Property ${propertyId} updated with details`,
+            propertyId: propertyId
+          }), { headers: corsHeaders });
+        } else {
+          return new Response(JSON.stringify({
+            success: false,
+            error: `Property ${propertyId} not found in any cache`
+          }), { status: 404, headers: corsHeaders });
+        }
+
+      } catch (error) {
+        console.error(`[${requestId}] [DETAIL] Error:`, error);
+        return new Response(JSON.stringify({ error: error.message }),
+          { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // ============================================
+    // ENDPOINT 9: Batch update property details
+    // ============================================
+    if (url.pathname === '/api/properties/batch-update-details' && request.method === 'POST') {
+      console.log(`[${requestId}] [ENDPOINT] /api/properties/batch-update-details`);
+
+      try {
+        const auth = request.headers.get('X-API-Key');
+        const expectedKey = env.ADMIN_KEY;
+
+        if (!expectedKey || auth !== expectedKey) {
+          return new Response(JSON.stringify({ error: 'Unauthorized' }),
+            { status: 401, headers: corsHeaders });
+        }
+
+        const { updates } = await request.json();
+        console.log(`[${requestId}] [BATCH] Updating ${updates.length} properties`);
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const update of updates) {
+          // Call the helper function to reuse the update logic
+          const updateResponse = await handlePropertyUpdate(env, update, requestId);
+          if (updateResponse.success) {
+            successCount++;
+          } else {
+            failCount++;
+          }
+        }
+
+        return new Response(JSON.stringify({
+          success: true,
+          updated: successCount,
+          failed: failCount,
+          total: updates.length
+        }), { headers: corsHeaders });
+
+      } catch (error) {
+        console.error(`[${requestId}] [BATCH] Error:`, error);
+        return new Response(JSON.stringify({ error: error.message }),
+          { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // ============================================
+    // 404 handler - No other endpoints matched
+    // ============================================
     console.log(`[${requestId}] [404] Not found: ${url.pathname}`);
     return new Response(JSON.stringify({
       error: 'Not found',
@@ -427,11 +571,52 @@ export default {
         'POST /api/cache/delete (admin)',
         'POST /api/cache/extend (admin)',
         'GET /api/health',
-        'POST /api/restore (admin) - NEW! Upload full data.json'
+        'POST /api/restore (admin) - Upload full data.json',
+        'POST /api/properties/update-details (admin) - Update single property details',
+        'POST /api/properties/batch-update-details (admin) - Batch update property details'
       ]
     }), { status: 404, headers: corsHeaders });
   },
 };
+
+// ============================================
+// HELPER FUNCTIONS OUTSIDE the fetch handler
+// ============================================
+
+// Helper function for property update
+async function handlePropertyUpdate(env, detailData, requestId) {
+  const { propertyId, allImages, description_ru, description_en, features, size, bedrooms, bathrooms, floor } = detailData;
+  const types = ['flats', 'houses', 'plots', 'commercial', 'luxury'];
+
+  for (const type of types) {
+    const cacheKey = `cache_${type}`;
+    const cached = await env.KV_BINDING.get(cacheKey, 'json');
+
+    if (cached && cached.data) {
+      const propertyIndex = cached.data.findIndex(p => p.id === propertyId);
+
+      if (propertyIndex !== -1) {
+        cached.data[propertyIndex] = {
+          ...cached.data[propertyIndex],
+          allImages: allImages || cached.data[propertyIndex].allImages || [],
+          description_ru: description_ru || cached.data[propertyIndex].description_ru,
+          description_en: description_en || cached.data[propertyIndex].description_en,
+          features: features || cached.data[propertyIndex].features || [],
+          size: size || cached.data[propertyIndex].size,
+          bedrooms: bedrooms || cached.data[propertyIndex].bedrooms,
+          bathrooms: bathrooms || cached.data[propertyIndex].bathrooms,
+          floor: floor || cached.data[propertyIndex].floor,
+          detailsUpdatedAt: new Date().toISOString()
+        };
+
+        await env.KV_BINDING.put(cacheKey, JSON.stringify(cached));
+        return { success: true, propertyId, type };
+      }
+    }
+  }
+
+  return { success: false, propertyId, error: 'Property not found' };
+}
 
 // ============================================
 // CACHE KEYS
@@ -520,7 +705,7 @@ async function getCacheStatus(env, requestId = 'unknown') {
 
   if (!status) {
     console.log(`[${requestId}] [getCacheStatus] No cache status found`);
-    const defaultTtl = (parseInt(env.CACHE_TTL_HOURS) || 24);
+    const defaultTtl = 8760;
     return {
       isFresh: false,
       lastUpdated: null,
@@ -531,33 +716,34 @@ async function getCacheStatus(env, requestId = 'unknown') {
     };
   }
 
-  // FIX: Validate lastUpdated exists and is a valid number
   if (!status.lastUpdated || typeof status.lastUpdated !== 'number' || isNaN(status.lastUpdated)) {
     console.log(`[${requestId}] [getCacheStatus] Invalid lastUpdated value: ${status.lastUpdated}, using current time`);
-    // Fix the status by setting current time
+    // Fix the status by setting current time with 1 year TTL
     const fixedStatus = {
       ...status,
       lastUpdated: now,
-      lastUpdatedISO: new Date(now).toISOString()
+      lastUpdatedISO: new Date(now).toISOString(),
+      ttlHours: status.ttlHours || 8760
     };
     await env.KV_BINDING.put(CACHE_KEYS.STATUS, JSON.stringify(fixedStatus));
     return {
-      isFresh: false,
+      isFresh: true, // FIX: Mark as fresh after fix
       lastUpdated: new Date(now).toISOString(),
       lastUpdatedTimestamp: now,
       ageMinutes: 0,
-      ttlHours: parseInt(env.CACHE_TTL_HOURS) || 24,
-      message: 'Cache status was invalid, has been fixed'
+      ttlHours: fixedStatus.ttlHours,
+      message: 'Cache status was invalid, has been fixed and is now fresh'
     };
   }
 
-  const age = now - status.lastUpdated;
-  const effectiveTtlHours = status.ttlHours || (parseInt(env.CACHE_TTL_HOURS) || 24);
+  const effectiveTtlHours = status.ttlHours || parseInt(env.CACHE_TTL_HOURS) || 8760;
   const cacheTTL = effectiveTtlHours * 60 * 60 * 1000;
+  const age = now - status.lastUpdated;
   const isFresh = age < cacheTTL;
 
   console.log(`[${requestId}] [getCacheStatus] cacheTTL: ${cacheTTL}ms (${cacheTTL / 3600000} hours)`);
   console.log(`[${requestId}] [getCacheStatus] Last updated: ${new Date(status.lastUpdated).toISOString()}, age: ${Math.floor(age / 60000)} minutes, isFresh: ${isFresh}`);
+  console.log(`[${requestId}] [getCacheStatus] TTL hours: ${effectiveTtlHours}, Age hours: ${age / 3600000}`);
 
   return {
     isFresh: isFresh,
