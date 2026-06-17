@@ -1,6 +1,73 @@
 // prus-api2 - Smart Cache Worker with Diagnostics
 // Combines data from statusm.me (4 types) + prus-api1 (luxury properties)
 
+// ============================================
+// KV USAGE TRACKING
+// ============================================
+
+// Track KV writes per day using a separate KV key
+const KV_USAGE_KEY = 'kv_usage';
+
+async function getKVUsage(env) {
+  try {
+    const usageData = await env.KV_BINDING.get(KV_USAGE_KEY, 'json');
+    const now = Date.now();
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
+    if (!usageData) {
+      return { date: today, count: 0, dailyLimit: 1000 };
+    }
+
+    // Reset if it's a new day
+    if (usageData.date !== today) {
+      // Reset counter for new day
+      const resetData = { date: today, count: 0, dailyLimit: 1000 };
+      await env.KV_BINDING.put(KV_USAGE_KEY, JSON.stringify(resetData));
+      return resetData;
+    }
+
+    return {
+      date: usageData.date,
+      count: usageData.count || 0,
+      dailyLimit: 1000,
+      remaining: 1000 - (usageData.count || 0),
+      resetAt: new Date(new Date().toISOString().split('T')[0] + 'T00:00:00.000Z').toISOString()
+    };
+  } catch (error) {
+    console.error('Failed to get KV usage:', error);
+    return { date: new Date().toISOString().split('T')[0], count: 0, dailyLimit: 1000, error: error.message };
+  }
+}
+
+async function incrementKVUsage(env, count = 1) {
+  try {
+    const usageData = await getKVUsage(env);
+    const today = new Date().toISOString().split('T')[0];
+
+    // Reset if new day
+    if (usageData.date !== today) {
+      const resetData = { date: today, count: count, dailyLimit: 1000 };
+      await env.KV_BINDING.put(KV_USAGE_KEY, JSON.stringify(resetData));
+      return resetData;
+    }
+
+    const newCount = (usageData.count || 0) + count;
+    const updated = {
+      date: today,
+      count: newCount,
+      dailyLimit: 1000,
+      remaining: 1000 - newCount,
+      resetAt: new Date(new Date().toISOString().split('T')[0] + 'T00:00:00.000Z').toISOString()
+    };
+    await env.KV_BINDING.put(KV_USAGE_KEY, JSON.stringify(updated));
+    return updated;
+  } catch (error) {
+    console.error('Failed to increment KV usage:', error);
+    return null;
+  }
+}
+
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -206,6 +273,7 @@ export default {
         }
 
         const status = await getCacheStatus(env, requestId);
+        const usage = await getKVUsage(env);
 
         const cacheKeysInfo = {};
         for (const [keyName, keyValue] of Object.entries(CACHE_KEYS)) {
@@ -216,6 +284,11 @@ export default {
             cacheKeysInfo[keyName] = `error: ${e.message}`;
           }
         }
+
+        // Calculate reset time based on UTC
+        const now = new Date();
+        const resetUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+        const hoursUntilReset = Math.round((resetUTC - now) / (1000 * 60 * 60));
 
         return new Response(JSON.stringify({
           status: 'healthy',
@@ -229,6 +302,13 @@ export default {
             cacheKeys: cacheKeysInfo,
           },
           cacheStats: status,
+          kvUsage: {
+            ...usage,
+            resetAt: resetUTC.toISOString(),
+            hoursUntilReset: hoursUntilReset,
+            remaining: Math.max(0, 1000 - (usage.count || 0)),
+            isLimitReached: (usage.count || 0) >= 1000
+          },
           config: {
             cacheTTLHours: parseInt(env.CACHE_TTL_HOURS || '1')
           },
